@@ -37,14 +37,15 @@ def setup_logging(cfg: Config) -> Path:
     COUNTER_PATH.write_text(str(run_idx))
 
     arch = "withG" if cfg.use_global_encoder else "noG"
-    run_name = f"{arch}_seed{cfg.seed}_{datetime.now():%Y%m%d-%H%M%S}"
+    fusion = str(getattr(cfg, "encoder_fusion", "gated")).strip().lower() or "gated"
+    run_name = f"{arch}_{fusion}_seed{cfg.seed}_{datetime.now():%Y%m%d-%H%M%S}"
     if cfg.run_slug is None:
         cfg.run_slug = run_name
 
     log_path = Path(cfg.log_dir) / f"{cfg.run_slug}.log"
     logging.basicConfig(
         level=logging.INFO,
-        format="[%(asctime)s] %(levelname)s 鈥?%(message)s",
+        format="[%(asctime)s] %(levelname)s %(message)s",
         handlers=[logging.StreamHandler(), logging.FileHandler(log_path, encoding="utf-8", mode="a")],
     )
 
@@ -119,6 +120,55 @@ def make_clip_schedule(max_clip: float, min_clip: float):
     return _schedule
 
 
+def _normalize_fusion_name(raw: Any) -> str:
+    normalized = str(raw).strip().lower()
+    if normalized in {"gated", "gate", "gated_fusion", "gated-fusion"}:
+        return "gated"
+    if normalized in {"convex", "convex_combination", "convex-combination"}:
+        return "convex"
+    return normalized or "unknown"
+
+
+def _infer_policy_encoder_fusion(model) -> str:
+    policy = getattr(model, "policy", None)
+    if policy is None:
+        return "unknown"
+
+    explicit = getattr(policy, "encoder_fusion", None)
+    if explicit is not None:
+        return _normalize_fusion_name(explicit)
+
+    encoder = getattr(policy, "encoder", None)
+    fusion = getattr(encoder, "fusion", None)
+    if hasattr(fusion, "branch_logits"):
+        return "convex"
+    if hasattr(fusion, "gate"):
+        return "gated"
+    return "unknown"
+
+
+def _validate_encoder_fusion(model, cfg: Config, source: str) -> None:
+    desired = _normalize_fusion_name(getattr(cfg, "encoder_fusion", "gated"))
+    actual = _infer_policy_encoder_fusion(model)
+    encoder = getattr(getattr(model, "policy", None), "encoder", None)
+    encoder_cls = type(encoder).__name__ if encoder is not None else "unknown"
+    logging.info(
+        "[ENCODER] source=%s desired_fusion=%s actual_fusion=%s encoder_cls=%s use_global=%s",
+        source,
+        desired,
+        actual,
+        encoder_cls,
+        bool(getattr(cfg, "use_global_encoder", True)),
+    )
+    if actual != "unknown" and desired != actual:
+        raise ValueError(
+            "Requested encoder_fusion=%r but loaded model uses %r. "
+            "Changing fusion is not supported when using RESUME_FROM/finetune_from; "
+            "start a fresh run or load a matching checkpoint."
+            % (desired, actual)
+        )
+
+
 # ===== Model construction/recovery =====
 def init_model(cfg: Config, train_env):
     """
@@ -138,6 +188,7 @@ def init_model(cfg: Config, train_env):
             device=cfg.device,
             custom_objects={"policy_class": JSSPPolicy}
         )
+        _validate_encoder_fusion(model, cfg, source="resume")
         return model
 
     # --- Path 2: Fine-tuning (finetune_from) ---
@@ -153,6 +204,7 @@ def init_model(cfg: Config, train_env):
                 device=cfg.device,
                 custom_objects={"policy_class": JSSPPolicy}
             )
+            _validate_encoder_fusion(model, cfg, source="finetune")
         else:
             logging.warning(f"[FINETUNE] 'finetune_from' was set, but model not found at {best_model_path}. Starting new.")
 
@@ -162,6 +214,7 @@ def init_model(cfg: Config, train_env):
             "num_layers": cfg.n_layers, "dropout": cfg.dropout,
             "dim_feedforward": int(cfg.ff_mult * cfg.d_model),
             "use_global_encoder": cfg.use_global_encoder,
+            "encoder_fusion": cfg.encoder_fusion,
         },
         "decoder_kwargs": {
             "d_model": cfg.d_model, "n_heads": cfg.n_heads, "dropout": cfg.dropout,
@@ -187,6 +240,7 @@ def init_model(cfg: Config, train_env):
             device=cfg.device,
             verbose=1,
         )
+        _validate_encoder_fusion(model, cfg, source="new")
 
     # --- For "new" or "fine-tuned" models, the scheduler is overwritten with the current configuration. ---
     logging.info("[CONFIG OVERRIDE] Applying schedules and PPO params from current config.")

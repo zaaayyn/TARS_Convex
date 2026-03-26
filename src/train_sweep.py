@@ -37,6 +37,53 @@ def make_clip_schedule(c0, c1):
         return c1 + 0.5*(c0-c1)*(1.0+math.cos(math.pi*t))
     return f
 
+
+def _normalize_fusion_name(raw: Any) -> str:
+    normalized = str(raw).strip().lower()
+    if normalized in {"gated", "gate", "gated_fusion", "gated-fusion"}:
+        return "gated"
+    if normalized in {"convex", "convex_combination", "convex-combination"}:
+        return "convex"
+    return normalized or "unknown"
+
+
+def _infer_policy_encoder_fusion(model) -> str:
+    policy = getattr(model, "policy", None)
+    if policy is None:
+        return "unknown"
+
+    explicit = getattr(policy, "encoder_fusion", None)
+    if explicit is not None:
+        return _normalize_fusion_name(explicit)
+
+    encoder = getattr(policy, "encoder", None)
+    fusion = getattr(encoder, "fusion", None)
+    if hasattr(fusion, "branch_logits"):
+        return "convex"
+    if hasattr(fusion, "gate"):
+        return "gated"
+    return "unknown"
+
+
+def _validate_encoder_fusion(model, cfg: Config, source: str) -> None:
+    desired = _normalize_fusion_name(getattr(cfg, "encoder_fusion", "gated"))
+    actual = _infer_policy_encoder_fusion(model)
+    encoder = getattr(getattr(model, "policy", None), "encoder", None)
+    encoder_cls = type(encoder).__name__ if encoder is not None else "unknown"
+    logging.info(
+        "[ENCODER] source=%s desired_fusion=%s actual_fusion=%s encoder_cls=%s use_global=%s",
+        source,
+        desired,
+        actual,
+        encoder_cls,
+        bool(getattr(cfg, "use_global_encoder", True)),
+    )
+    if actual != "unknown" and desired != actual:
+        raise ValueError(
+            "Requested encoder_fusion=%r but instantiated model uses %r."
+            % (desired, actual)
+        )
+
 # ======== Terminal and file dual logging ========
 def setup_terminal_logger(log_path: str):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -69,7 +116,9 @@ def setup_logging(cfg):
         run_idx = 1
     COUNTER_PATH.write_text(str(run_idx))
 
-    cfg.run_name = f"exp{run_idx:03d}_{cfg.seed}_{datetime.datetime.now():%Y%m%d-%H%M%S}"
+    arch = "withG" if cfg.use_global_encoder else "noG"
+    fusion = str(getattr(cfg, "encoder_fusion", "gated")).strip().lower() or "gated"
+    cfg.run_name = f"exp{run_idx:03d}_{arch}_{fusion}_seed{cfg.seed}_{datetime.datetime.now():%Y%m%d-%H%M%S}"
     cfg.run_slug = cfg.run_name
 
     log_path = Path(cfg.log_dir) / f"{cfg.run_name}.log"
@@ -81,7 +130,7 @@ def setup_logging(cfg):
 
 # ======== Model construction ========
 def init_model(cfg: Config, env):
-    return MaskablePPO(
+    model = MaskablePPO(
         policy=JSSPPolicy,
         env=env,
         learning_rate=make_lr_schedule(
@@ -110,6 +159,7 @@ def init_model(cfg: Config, env):
                 "n_heads": cfg.n_heads,
                 "num_layers": cfg.n_layers,
                 "use_global_encoder": cfg.use_global_encoder,
+                "encoder_fusion": cfg.encoder_fusion,
             },
             "decoder_kwargs": {
                 "d_model": cfg.d_model,
@@ -119,6 +169,8 @@ def init_model(cfg: Config, env):
         device=cfg.device,
         verbose=1,
     )
+    _validate_encoder_fusion(model, cfg, source="new")
+    return model
 
 def train_loop(model, callbacks, cfg):
     model.learn(

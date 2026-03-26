@@ -4,7 +4,7 @@ import time
 import random
 import traceback
 from pathlib import Path
-from typing import List, Optional, Dict, Union
+from typing import List, Optional, Dict, Union, Any
 
 import gymnasium as gym
 import numpy as np
@@ -259,6 +259,59 @@ class StepMetricsCallback(BaseCallback):
         self._last_time = None
         self._last_step = None
         self._ema_sps: Optional[float] = None
+        self._convex_branch_param: Optional[torch.nn.Parameter] = None
+        self._convex_hook: Optional[Any] = None
+        self._last_convex_grad: Optional[np.ndarray] = None
+        self._last_convex_grad_total_norm: Optional[float] = None
+
+    def _capture_convex_grad(self, grad: torch.Tensor) -> torch.Tensor:
+        grad_cpu = grad.detach().float().cpu()
+        self._last_convex_grad = grad_cpu.numpy().copy()
+        self._last_convex_grad_total_norm = float(grad_cpu.norm().item())
+        return grad
+
+    def _attach_convex_hook(self) -> None:
+        policy = getattr(self.model, "policy", None)
+        encoder = getattr(policy, "encoder", None)
+        fusion = getattr(encoder, "fusion", None)
+        branch_logits = getattr(fusion, "branch_logits", None)
+        if isinstance(branch_logits, torch.nn.Parameter):
+            self._convex_branch_param = branch_logits
+            self._convex_hook = branch_logits.register_hook(self._capture_convex_grad)
+            logging.info("[Convex] enabled branch logits monitoring")
+
+    def _detach_convex_hook(self) -> None:
+        if self._convex_hook is not None:
+            try:
+                self._convex_hook.remove()
+            except Exception:
+                pass
+        self._convex_hook = None
+
+    def _on_training_start(self) -> None:
+        self._attach_convex_hook()
+
+    def _append_convex_metrics(self, light: Dict[str, Union[float, str]]) -> None:
+        if self._convex_branch_param is None:
+            return
+
+        logits = self._convex_branch_param.detach().float().cpu()
+        weights = torch.softmax(logits, dim=0)
+        branch_names = ("job", "mach", "global")
+        for idx, name in enumerate(branch_names):
+            light[f"train/convex/logits/{name}"] = float(logits[idx].item())
+            light[f"train/convex/weights/{name}"] = float(weights[idx].item())
+
+        if self._last_convex_grad is None:
+            return
+
+        light["train/convex/grad_norm/total"] = float(
+            self._last_convex_grad_total_norm if self._last_convex_grad_total_norm is not None
+            else np.linalg.norm(self._last_convex_grad)
+        )
+        for idx, name in enumerate(branch_names):
+            light[f"train/convex/grad/{name}"] = float(self._last_convex_grad[idx])
+            light[f"train/convex/grad_norm/{name}"] = float(abs(self._last_convex_grad[idx]))
 
     def _on_step(self) -> bool:
         if self.n_calls % self.freq != 0:
@@ -297,9 +350,13 @@ class StepMetricsCallback(BaseCallback):
         self._last_time = now
         self._last_step = step
 
+        self._append_convex_metrics(light)
         light["global/timestep"] = step
         wandb.log(light, step=step)
         return True
+
+    def _on_training_end(self) -> None:
+        self._detach_convex_hook()
 
 
 # ======================= Episode Callbacks =======================

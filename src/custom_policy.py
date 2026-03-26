@@ -6,8 +6,23 @@ from typing import Any, Dict, Optional, Union
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 from sb3_contrib.common.maskable.distributions import MaskableCategorical
 
-from encoder import JSSPEncoder
+from encoder import JSSPEncoder as GatedJSSPEncoder
+from encoder_convex import JSSPEncoder as ConvexJSSPEncoder
 from decoder import StepwiseSchedulingDecoder
+
+
+def _normalize_encoder_fusion(fusion: str) -> str:
+    normalized = str(fusion).strip().lower()
+    if normalized in {"gated", "gate", "gated_fusion", "gated-fusion"}:
+        return "gated"
+    if normalized in {"convex", "convex_combination", "convex-combination"}:
+        return "convex"
+    raise ValueError(f"Unknown encoder_fusion: {fusion!r}. Expected 'gated' or 'convex'.")
+
+
+def _resolve_encoder_class(fusion: str):
+    normalized = _normalize_encoder_fusion(fusion)
+    return GatedJSSPEncoder if normalized == "gated" else ConvexJSSPEncoder
 
 
 class DummyExtractor(nn.Module):
@@ -27,7 +42,7 @@ class DummyExtractor(nn.Module):
 
 class JSSPPolicy(MaskableActorCriticPolicy):
     """
-    Custom strategy: Encoder (three-way structure + gated fusion) + single-step Decoder.
+    Custom strategy: Encoder (three-way structure + selected fusion) + single-step Decoder.
     Also overrides get_distribution / evaluate_actions / predict_values.
     """
     def __init__(
@@ -54,7 +69,10 @@ class JSSPPolicy(MaskableActorCriticPolicy):
         self.pi_features_extractor = DummyExtractor(self._latent_dim_pi, self._latent_dim_vf)
         self.vf_features_extractor = self.pi_features_extractor
 
-        self.encoder = JSSPEncoder(**encoder_kwargs)
+        fusion = encoder_kwargs.pop("encoder_fusion", encoder_kwargs.pop("fusion_type", "gated"))
+        self.encoder_fusion = _normalize_encoder_fusion(fusion)
+        encoder_cls = _resolve_encoder_class(self.encoder_fusion)
+        self.encoder = encoder_cls(**encoder_kwargs)
         self.decoder = StepwiseSchedulingDecoder(**decoder_kwargs)
 
         # Critic: Masked-mean pooled representation of available actions/unscheduled actions

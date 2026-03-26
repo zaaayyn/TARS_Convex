@@ -23,25 +23,26 @@ class Config:
     auto_resume: bool = False             # Automatically restore from the most recent ckpt
 
     # ========= General =========
-    seed: int = 8712              
-    num_workers: int = 8
+    seed: int = 87             
+    num_workers: int = 32
     device: str = "auto"
     wandb_online: bool = True
 
     # ========= Features/Network =========
-    feature_type: str = "static_only"   # full | static_only | static_plus_start_time
+    feature_type: str = "full"   # full | static_only | static_plus_start_time
     input_dim: int = 9                  # Will be automatically adjusted in train.py according to feature_type
     d_model: int = 256
     n_heads: int = 16
     n_layers: int = 3
     ff_mult: int = 2
     dropout: float = 0.1
-    use_global_encoder: bool = True
+    use_global_encoder: bool = False
+    encoder_fusion: str = "convex"     # gated | convex
 
     # ========= Training =========
-    total_timesteps: int = 2_000_000
+    total_timesteps: int = 1_500_000
     n_envs: int = num_workers
-    n_steps: int = 1024
+    n_steps: int = 216
 
     # —— Dynamic batch switching (sliding window + insurance)——
     switch_episodes: int = 128*8
@@ -51,24 +52,24 @@ class Config:
 
     # —— Reward related —— 
     reward_alpha: float = 1.0
-    reward_mode: str = "shaped"  # shaped | terminal | mixed
+    reward_mode: str = "terminal"  # shaped | terminal | mixed
 
     # —— PPO Hyperparameters —— 
-    batch_size: int = 256
-    n_epochs: int = 1
-    learning_rate: float = 1e-5
-    lr_final_ratio: float = 0.1
-    lr_warmup_ratio: float = 0.05
+    batch_size: int = 1024
+    n_epochs: int = 8
+    learning_rate: float = 2e-4
+    lr_final_ratio: float = 0.15
+    lr_warmup_ratio: float = 1
     clip_range_max: float = 0.2
     clip_range_min: float = 0.05
-    entropy_coef: float = 0.015
+    entropy_coef: float = 0.01
     end_entropy_coef: float = 0.001
     entropy_power: float = 1.5
     entropy_mode: str = "power_decay"  # | warmup_decay
     entropy_warmup_ratio: float = 0.1
     vf_coef: float = 0.5
-    gamma: float = 1.0
-    gae_lambda: float = 1.0
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
     target_kl: float = 0.01
     max_grad_norm: float = 1.0
 

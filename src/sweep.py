@@ -30,7 +30,7 @@ def _find_train_script() -> Path:
 TRAIN_SCRIPT = _find_train_script()
 
 WANDB_ENTITY  = None  # If you need a fixed entity, fill in "your-entity"
-WANDB_PROJECT = "JSSP_Tuning_full_nonglobal_gated"
+WANDB_PROJECT = "JSSP"
 
 def _rank_ascending(values):
     idx = sorted(range(len(values)), key=lambda i: (values[i], i))
@@ -111,7 +111,7 @@ def promote_top_and_longrun(
 
 # ======= Sweep Search Space =======
 sweep_config = {
-    "name": "sweep",
+    "name": "sweep_fusion",
     "method": "bayes",
     "metric": {"name": "eval/online_mean_gap", "goal": "minimize"},
     "parameters": {
@@ -128,14 +128,15 @@ sweep_config = {
         # --- Experiment setup ---
         "feature_type":     {"values": ["full"]},
         "use_global_encoder": {"values": [False]},
-        "n_epochs":         {"values": [1, 2, 4]},           
+        "encoder_fusion":   {"values": ["gated", "convex"]},
+        "n_epochs":         {"values": [16]},           
         "n_envs":           {"value": 32},
         
         # --- timesteps ---
-        "total_timesteps":  {"value": 500_000},      
+        "total_timesteps":  {"value": 1_000_000},      
         
         # --- PPO parameters ---
-        "gamma":            {"values": [0.99, 0.995, 1.0]},
+        "gamma":            {"values": [0.99]},
         "vf_coef":          {"value": 0.5},
         "max_grad_norm":    {"value": 1.0},
         "clip_range_min":   {"value": 0.05},
@@ -145,13 +146,13 @@ sweep_config = {
         # ================================================================
 
         # --- lr ---
-        "learning_rate":    {"distribution": "log_uniform_values", "min": 1e-5, "max": 3e-4},
+        "learning_rate":    {"value": 2e-4}, #{"distribution": "log_uniform_values", "min": 5e-5, "max": 3e-4},
         
         "reward_mode":      {"values": ["shaped"]},
 
         # --- Rollout Buffer ---
-        "n_steps":          {"values": [144, 216, 288]}, # 6x6下，测试 36*4 和 36*6 两种长度
-        "batch_size":       {"values": [512, 1024]},
+        "n_steps":          {"values": [216]}, # 6x6下，测试 36*4 和 36*6 两种长度
+        "batch_size":       {"values": [512]},
 
         # --- PPO stability parameters ---
         "clip_range_max":   {"values": [0.2]},
@@ -159,7 +160,7 @@ sweep_config = {
         "target_kl":        {"values": [0.01]},
 
         # --- Exploration and Regularization ---
-        "entropy_coef":     {"values": [0.005, 0.01, 0.015, 0.02]},
+        "entropy_coef":     {"values": [0.02]},
         "dropout":          {"values": [0.1]},
         
         "seed":             {"values": [87]},
@@ -170,7 +171,7 @@ if __name__ == "__main__":
     sweep_id = wandb.sweep(sweep=sweep_config, project=WANDB_PROJECT, entity=WANDB_ENTITY)
     print("Created sweep:", sweep_id)
     # Let the agent call the entry point we provided (train_sweep.main）
-    wandb.agent(sweep_id, function=entry, count=50)
+    wandb.agent(sweep_id, function=entry, count=2)
 
     # If you need to do a "long-term refresher" on the optimal configurations, uncomment:
     # promote_top_and_longrun(sweep_id=sweep_id, top_n=5, long_steps=1_000_000, finetune=False)
